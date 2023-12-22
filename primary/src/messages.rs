@@ -10,10 +10,31 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 
+#[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub enum Decision {
+    Ok(u64),
+    Complain(u64),
+    Propose(u64),
+    #[default]
+    Empty,
+}
+
+impl Into<Vec<u8>> for Decision {
+    fn into(self) -> Vec<u8> {
+        match self {
+            Decision::Ok(v) => format!("V{}", v).into(),
+            Decision::Complain(v) => format!("C{}", v).into(),
+            Decision::Propose(v) => format!("P{}", v).into(),
+            Decision::Empty => "E".into(),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Header {
     pub author: PublicKey,
     pub round: Round,
+    pub decision: Decision,
     pub payload: BTreeMap<Digest, WorkerId>,
     pub parents: BTreeSet<Digest>,
     pub id: Digest,
@@ -24,6 +45,7 @@ impl Header {
     pub async fn new(
         author: PublicKey,
         round: Round,
+        decision: Decision,
         payload: BTreeMap<Digest, WorkerId>,
         parents: BTreeSet<Digest>,
         signature_service: &mut SignatureService,
@@ -31,6 +53,7 @@ impl Header {
         let header = Self {
             author,
             round,
+            decision,
             payload,
             parents,
             id: Digest::default(),
@@ -56,7 +79,7 @@ impl Header {
         // Ensure all worker ids are correct.
         for worker_id in self.payload.values() {
             committee
-                .worker(&self.author, &worker_id)
+                .worker(&self.author, worker_id)
                 .map_err(|_| DagError::MalformedHeader(self.id.clone()))?;
         }
 
@@ -72,6 +95,8 @@ impl Hash for Header {
         let mut hasher = Sha512::new();
         hasher.update(&self.author);
         hasher.update(self.round.to_le_bytes());
+        let decision_bytes: Vec<u8> = self.decision.into();
+        hasher.update(decision_bytes);
         for (x, y) in &self.payload {
             hasher.update(x);
             hasher.update(y.to_le_bytes());
@@ -87,9 +112,11 @@ impl fmt::Debug for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: B{}({}, {})",
+            "{}: B R{} Decision {:#?} ({}, {})",
             self.id,
             self.round,
+            // self.view.unwrap_or(std::u64::MAX),
+            self.decision,
             self.author,
             self.payload.keys().map(|x| x.size()).sum::<usize>(),
         )
@@ -98,7 +125,11 @@ impl fmt::Debug for Header {
 
 impl fmt::Display for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "B{}({})", self.round, self.author)
+        write!(
+            f,
+            "B R{} D{:#?} ({})",
+            self.round, self.decision, self.author
+        )
     }
 }
 
@@ -156,7 +187,7 @@ impl fmt::Debug for Vote {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: V{}({}, {})",
+            "{}: Vote R{} ({}, {})",
             self.digest(),
             self.round,
             self.author,
@@ -179,6 +210,7 @@ impl Certificate {
             .map(|name| Self {
                 header: Header {
                     author: *name,
+                    round: 0,
                     ..Header::default()
                 },
                 ..Self::default()
@@ -218,8 +250,19 @@ impl Certificate {
         self.header.round
     }
 
+    pub fn view(&self) -> Option<Round> {
+        match self.header.decision {
+            Decision::Complain(v) | Decision::Ok(v) | Decision::Propose(v) => Some(v), 
+            _ => None
+        }
+    }
+
     pub fn origin(&self) -> PublicKey {
         self.header.author
+    }
+
+    pub fn decision(&self) -> Decision {
+        self.header.decision
     }
 }
 

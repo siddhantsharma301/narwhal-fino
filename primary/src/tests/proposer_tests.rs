@@ -11,15 +11,17 @@ async fn propose_empty() {
     let (_tx_parents, rx_parents) = channel(1);
     let (_tx_our_digests, rx_our_digests) = channel(1);
     let (tx_headers, mut rx_headers) = channel(1);
+    let (_tx_next_view_decision, rx_next_view_decision) = channel(1);
 
     // Spawn the proposer.
     Proposer::spawn(
         name,
-        &committee(),
+        committee(),
         signature_service,
         /* header_size */ 1_000,
         /* max_header_delay */ 20,
         /* rx_core */ rx_parents,
+        /* rx_next_view_decision */ rx_next_view_decision,
         /* rx_workers */ rx_our_digests,
         /* tx_core */ tx_headers,
     );
@@ -39,15 +41,17 @@ async fn propose_payload() {
     let (_tx_parents, rx_parents) = channel(1);
     let (tx_our_digests, rx_our_digests) = channel(1);
     let (tx_headers, mut rx_headers) = channel(1);
+    let (_tx_next_view_decision, rx_next_view_decision) = channel(1);
 
     // Spawn the proposer.
     Proposer::spawn(
         name,
-        &committee(),
+        committee(),
         signature_service,
         /* header_size */ 32,
         /* max_header_delay */ 1_000_000, // Ensure it is not triggered.
         /* rx_core */ rx_parents,
+        /* rx_next_view_decision */ rx_next_view_decision,
         /* rx_workers */ rx_our_digests,
         /* tx_core */ tx_headers,
     );

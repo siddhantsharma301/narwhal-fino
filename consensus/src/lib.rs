@@ -3,7 +3,7 @@ use config::{Committee, Stake};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
 use log::{debug, info, log_enabled, warn};
-use primary::{Certificate, Round};
+use primary::{Certificate, Decision, Round};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -14,17 +14,25 @@ pub mod consensus_tests;
 
 /// The representation of the DAG in memory.
 type Dag = HashMap<Round, HashMap<PublicKey, (Digest, Certificate)>>;
+type LogicalDag = HashMap<Round, HashMap<PublicKey, Vec<(Digest, Certificate)>>>;
 
 /// The state that needs to be persisted for crash-recovery.
 struct State {
     /// The last committed round.
     last_committed_round: Round,
+    /// The last committed view.
+    last_committed_view: Round,
     // Keeps the last committed round for each authority. This map is used to clean up the dag and
     // ensure we don't commit twice the same certificate.
     last_committed: HashMap<PublicKey, Round>,
     /// Keeps the latest committed certificate (and its parents) for every authority. Anything older
     /// must be regularly cleaned up through the function `update`.
     dag: Dag,
+    /// Keeps the latest committed certificates ordered by view for every authorithy. Anything older 
+    /// must be regularly cleaned up through the function `update`.
+    /// TODO: Fix update to clear logical dag state 
+    logical_dag: LogicalDag,
+    seen_leader: HashMap<Round, bool>,
 }
 
 impl State {
@@ -33,26 +41,41 @@ impl State {
             .into_iter()
             .map(|x| (x.origin(), (x.digest(), x)))
             .collect::<HashMap<_, _>>();
+        let mut init_logical_dag: LogicalDag = HashMap::new();
+        for (r, v1) in [(0, genesis.clone())].iter().cloned().collect::<HashMap<_, _>>() {
+            for (pk, dc) in v1 {
+                init_logical_dag
+                    .entry(r)
+                    .or_insert_with(|| HashMap::new())
+                    .entry(pk)
+                    .or_insert_with(|| Vec::new())
+                    .push(dc);
+            }
+        }
 
         Self {
             last_committed_round: 0,
+            last_committed_view: 0,
             last_committed: genesis.iter().map(|(x, (_, y))| (*x, y.round())).collect(),
-            dag: [(0, genesis)].iter().cloned().collect(),
+            dag: [(0, genesis.clone())].iter().cloned().collect(),
+            logical_dag: init_logical_dag,
+            seen_leader: HashMap::from([(0, false)]),
         }
     }
 
+    // TODO: Fix this function to work for newly committed views
     /// Update and clean up internal state base on committed certificates.
     fn update(&mut self, certificate: &Certificate, gc_depth: Round) {
         self.last_committed
             .entry(certificate.origin())
-            .and_modify(|r| *r = max(*r, certificate.round()))
+            .and_modify(|r: &mut u64| *r = max(*r, certificate.round()))
             .or_insert_with(|| certificate.round());
 
         let last_committed_round = *self.last_committed.values().max().unwrap();
         self.last_committed_round = last_committed_round;
 
         for (name, round) in &self.last_committed {
-            self.dag.retain(|r, authorities| {
+            self.dag.retain(|r: &u64, authorities| {
                 authorities.retain(|n, _| n != name || r >= round);
                 !authorities.is_empty() && r + gc_depth >= last_committed_round
             });
@@ -108,54 +131,76 @@ impl Consensus {
         while let Some(certificate) = self.rx_primary.recv().await {
             debug!("Processing {:?}", certificate);
             let round = certificate.round();
+            let wrapped_view = certificate.view();
+            let view = if wrapped_view.is_some() {
+                wrapped_view.unwrap()
+            } else {
+                std::u64::MAX
+            };
 
             // Add the new certificate to the local storage.
-            state
-                .dag
-                .entry(round)
-                .or_insert_with(HashMap::new)
-                .insert(certificate.origin(), (certificate.digest(), certificate));
-
-            // Try to order the dag to commit. Start from the highest round for which we have at least
-            // 2f+1 certificates. This is because we need them to reveal the common coin.
-            let r = round - 1;
-
-            // We only elect leaders for even round numbers.
-            if r % 2 != 0 || r < 4 {
-                continue;
+            state.dag.entry(round).or_insert_with(HashMap::new).insert(
+                certificate.origin(),
+                (certificate.digest(), certificate.clone()),
+            );
+            if wrapped_view.is_some() {
+                state
+                    .logical_dag
+                    .entry(view)
+                    .or_insert_with(HashMap::new)
+                    .entry(certificate.origin())
+                    .or_insert_with(|| Vec::new())
+                    .push((certificate.digest(), certificate.clone()));
             }
 
-            // Get the certificate's digest of the leader of round r-2. If we already ordered this leader,
-            // there is nothing to do.
-            let leader_round = r - 2;
-            if leader_round <= state.last_committed_round {
+            // Already considered committing this view above if valid
+            if view <= state.last_committed_view {
                 continue;
             }
-            let (leader_digest, leader) = match self.leader(leader_round, &state.dag) {
+            let (_leader_digest, leader) = match self.leader(view, &state.logical_dag) {
                 Some(x) => x,
                 None => continue,
             };
+            if state.seen_leader.contains_key(&view) {
+                let seen = *state.seen_leader.get(&view).unwrap();
+                if !seen {
+                    *state.seen_leader.get_mut(&view).unwrap() =
+                        leader.origin() == certificate.origin();
+                }
+            }
 
-            // Check if the leader has f+1 support from its children (ie. round r-1).
-            let stake: Stake = state
-                .dag
-                .get(&(r - 1))
-                .expect("We should have the whole history by now")
-                .values()
-                .filter(|(_, x)| x.header.parents.contains(&leader_digest))
-                .map(|(_, x)| self.committee.stake(&x.origin()))
-                .sum();
-
-            // If it is the case, we can commit the leader. But first, we need to recursively go back to
-            // the last committed leader, and commit all preceding leaders in the right order. Committing
-            // a leader block means committing all its dependencies.
-            if stake < self.committee.validity_threshold() {
-                debug!("Leader {:?} does not have enough support", leader);
+            // Get the certificate's digest of the leader. If we already ordered this leader, there is nothing to do.
+            let leader_round = leader.round() - 1;
+            if leader_round <= state.last_committed_round || leader.round() < 2 {
                 continue;
             }
 
+            // Try to see if leader of this view committed
+            let ok_stake: Stake = state.logical_dag
+                .get(&view)
+                .expect("We should have the whole history by now")
+                .values()
+                .map(|vals| 
+                    vals
+                        .iter()
+                        .filter(|(_, x)| {
+                            match x.view() {
+                                Some(v) => x.decision() == Decision::Ok(v),
+                                _ => false,
+                            }
+                        })
+                        .map(|(_, x)| self.committee.stake(&x.origin())).sum::<Stake>())
+                .sum();
+            
+            if ok_stake < self.committee.validity_threshold() {
+                debug!("Leader {:?} does not have enough support", leader);
+                continue;
+            }
+            state.last_committed_view = view;
+            state.last_committed_round = leader_round;
+
             // Get an ordered list of past leaders that are linked to the current leader.
-            debug!("Leader {:?} has enough support", leader);
+            debug!("Leader {:?} has enough support in round {:?} and decision {:?}", leader, leader.round(), leader.decision());
             let mut sequence = Vec::new();
             for leader in self.order_leaders(leader, &state).iter().rev() {
                 // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
@@ -200,40 +245,55 @@ impl Consensus {
 
     /// Returns the certificate (and the certificate's digest) originated by the leader of the
     /// specified round (if any).
-    fn leader<'a>(&self, round: Round, dag: &'a Dag) -> Option<&'a (Digest, Certificate)> {
+    fn leader<'a>(&self, round: Round, dag: &'a LogicalDag) -> Option<&'a (Digest, Certificate)> {
         // TODO: We should elect the leader of round r-2 using the common coin revealed at round r.
         // At this stage, we are guaranteed to have 2f+1 certificates from round r (which is enough to
         // compute the coin). We currently just use round-robin.
         #[cfg(test)]
-        let coin = 0;
+        let seed = 0;
         #[cfg(not(test))]
-        let coin = round;
+        let seed = round;
 
         // Elect the leader.
-        let mut keys: Vec<_> = self.committee.authorities.keys().cloned().collect();
-        keys.sort();
-        let leader = keys[coin as usize % self.committee.size()];
+        let leader = self.committee.leader(seed as usize);
 
-        // Return its certificate and the certificate's digest.
-        dag.get(&round).map(|x| x.get(&leader)).flatten()
+        // Return its certificate and the certificate's digest. (any certificate is fine, since they 
+        // come from the same leader and view)
+        let has_leader = dag.get(&round).map(|x| x.get(&leader)).flatten();
+        match has_leader {
+            Some(_) => { 
+                let leader = has_leader.unwrap().get(0);
+                match leader {
+                    Some(_) => {
+                        let view = leader.unwrap().1.view().unwrap();
+                        if leader.unwrap().1.decision() == Decision::Propose(view) {
+                            leader
+                        } else {
+                            None
+                        }
+                    },
+                    _ => None,
+                }
+                // if leader.is_some() && leader.unwrap().1.decision() == Decision::Propose {
+                //     return leader;
+                // } else {
+                //     return None;
+                // }
+            },
+            None => None,
+        }
     }
 
     /// Order the past leaders that we didn't already commit.
     fn order_leaders(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
         let mut to_commit = vec![leader.clone()];
         let mut leader = leader;
-        for r in (state.last_committed_round + 2..leader.round())
-            .rev()
-            .step_by(2)
-        {
-            // Get the certificate proposed by the previous leader.
-            let (_, prev_leader) = match self.leader(r, &state.dag) {
+        for v in (state.last_committed_view + 1..leader.view().unwrap()).rev() {
+            let (_, prev_leader) = match self.leader(v, &state.logical_dag) {
                 Some(x) => x,
                 None => continue,
             };
-
-            // Check whether there is a path between the last two leaders.
-            if self.linked(leader, prev_leader, &state.dag) {
+            if self.linked(leader, prev_leader, &state.logical_dag) {
                 to_commit.push(prev_leader.clone());
                 leader = prev_leader;
             }
@@ -242,18 +302,26 @@ impl Consensus {
     }
 
     /// Checks if there is a path between two leaders.
-    fn linked(&self, leader: &Certificate, prev_leader: &Certificate, dag: &Dag) -> bool {
+    fn linked(&self, leader: &Certificate, prev_leader: &Certificate, dag: &LogicalDag) -> bool {
         let mut parents = vec![leader];
-        for r in (prev_leader.round()..leader.round()).rev() {
+        for v in (prev_leader.view().unwrap()..leader.view().unwrap()).rev() {
             parents = dag
-                .get(&(r))
+                .get(&v)
                 .expect("We should have the whole history by now")
                 .values()
-                .filter(|(digest, _)| parents.iter().any(|x| x.header.parents.contains(digest)))
-                .map(|(_, certificate)| certificate)
-                .collect();
+                .filter(|vals| 
+                    vals
+                        .iter()
+                        .filter(|(_digest, _)| parents.iter().any(|x| *x == prev_leader))
+                        .collect::<Vec<_>>().len() > 0
+                )
+                .flat_map(|vals| vals.iter().map(|(_, certificate)| certificate))
+                .collect::<Vec<_>>();
+            if parents.len() >= 1 {
+                return true;
+            }
         }
-        parents.contains(&prev_leader)
+        false
     }
 
     /// Flatten the dag referenced by the input certificate. This is a classic depth-first search (pre-order):

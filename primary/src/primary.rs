@@ -76,6 +76,7 @@ impl Primary {
         let (tx_certificates_loopback, rx_certificates_loopback) = channel(CHANNEL_CAPACITY);
         let (tx_primary_messages, rx_primary_messages) = channel(CHANNEL_CAPACITY);
         let (tx_cert_requests, rx_cert_requests) = channel(CHANNEL_CAPACITY);
+        let (tx_next_view_decision, rx_next_view_decision) = channel(CHANNEL_CAPACITY);
 
         // Write the parameters to the logs.
         parameters.log();
@@ -147,10 +148,12 @@ impl Primary {
             signature_service.clone(),
             consensus_round.clone(),
             parameters.gc_depth,
+            parameters.max_header_delay,
             /* rx_primaries */ rx_primary_messages,
             /* rx_header_waiter */ rx_headers_loopback,
             /* rx_certificate_waiter */ rx_certificates_loopback,
             /* rx_proposer */ rx_headers,
+            tx_next_view_decision,
             tx_consensus,
             /* tx_proposer */ tx_parents,
         );
@@ -188,11 +191,12 @@ impl Primary {
         // digests from our workers and it back to the `Core`.
         Proposer::spawn(
             name,
-            &committee,
+            committee.clone(),
             signature_service,
             parameters.header_size,
             parameters.max_header_delay,
             /* rx_core */ rx_parents,
+            rx_next_view_decision,
             /* rx_workers */ rx_our_digests,
             /* tx_core */ tx_headers,
         );

@@ -1,7 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::aggregators::{CertificatesAggregator, VotesAggregator};
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, Header, Vote};
+use crate::messages::{Certificate, Decision, Header, Vote};
 use crate::primary::{PrimaryMessage, Round};
 use crate::synchronizer::Synchronizer;
 use async_recursion::async_recursion;
@@ -11,11 +11,13 @@ use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
 use log::{debug, error, warn};
 use network::{CancelHandler, ReliableSender};
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::time::{sleep, Duration, Instant};
 
 #[cfg(test)]
 #[path = "tests/core_tests.rs"]
@@ -45,17 +47,27 @@ pub struct Core {
     rx_certificate_waiter: Receiver<Certificate>,
     /// Receives our newly created headers from the `Proposer`.
     rx_proposer: Receiver<Header>,
+    /// Send next view decision
+    tx_next_view_decision: Sender<Decision>,
     /// Output all certificates to the consensus layer.
     tx_consensus: Sender<Certificate>,
     /// Send valid a quorum of certificates' ids to the `Proposer` (along with their round).
-    tx_proposer: Sender<(Vec<Digest>, Round)>,
+    tx_proposer: Sender<(Vec<Certificate>, Round)>,
 
     /// The last garbage collected round.
     gc_round: Round,
+    /// Maintain view information
+    view: Round,
+    /// Max delay for a given view
+    max_header_delay: u64,
+    /// timer expiry
+    timer_expired: bool,
     /// The authors of the last voted headers.
     last_voted: HashMap<Round, HashSet<PublicKey>>,
     /// The set of headers we are currently processing.
     processing: HashMap<Round, HashSet<Digest>>,
+    /// Store decision counts over views
+    decision_counts: HashMap<Decision, usize>,
     /// The last header we proposed (for which we are waiting votes).
     current_header: Header,
     /// Aggregates votes into a certificate.
@@ -78,12 +90,14 @@ impl Core {
         signature_service: SignatureService,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
+        max_header_delay: u64,
         rx_primaries: Receiver<PrimaryMessage>,
         rx_header_waiter: Receiver<Header>,
         rx_certificate_waiter: Receiver<Certificate>,
         rx_proposer: Receiver<Header>,
+        tx_next_view_decision: Sender<Decision>,
         tx_consensus: Sender<Certificate>,
-        tx_proposer: Sender<(Vec<Digest>, Round)>,
+        tx_proposer: Sender<(Vec<Certificate>, Round)>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -94,15 +108,20 @@ impl Core {
                 signature_service,
                 consensus_round,
                 gc_depth,
+                max_header_delay,
+                timer_expired: false,
                 rx_primaries,
                 rx_header_waiter,
                 rx_certificate_waiter,
                 rx_proposer,
+                tx_next_view_decision,
                 tx_consensus,
                 tx_proposer,
                 gc_round: 0,
+                view: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
                 processing: HashMap::with_capacity(2 * gc_depth as usize),
+                decision_counts: HashMap::with_capacity(2 * gc_depth as usize),
                 current_header: Header::default(),
                 votes_aggregator: VotesAggregator::new(),
                 certificates_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
@@ -170,6 +189,54 @@ impl Core {
             DagError::HeaderRequiresQuorum(header.id.clone())
         );
 
+        // FINO
+        let decision = header.decision.clone();
+        match decision {
+            Decision::Ok(v) | Decision::Complain(v) | Decision::Propose(v) => {
+                debug!("Header and decision are {:?}, {:?}", header.clone(), decision.clone());
+                match v.cmp(&self.view) {
+                    CmpOrdering::Less => {}
+                    CmpOrdering::Greater => {
+                        self.view = v;
+                        self.decision_counts
+                            .entry(decision)
+                            .and_modify(|count| *count += 1)
+                            .or_insert(1);
+                    }
+                    CmpOrdering::Equal => {
+                        self.decision_counts
+                            .entry(decision)
+                            .and_modify(|count| *count += 1)
+                            .or_insert(1);
+                    }
+                }
+                if decision == Decision::Propose(v) {
+                    match self.timer_expired {
+                        true => {
+                            self.tx_next_view_decision
+                                .send(Decision::Complain(v))
+                                .await
+                                .expect("Unable to send complaint");
+                        }
+                        _ => {
+                            self.tx_next_view_decision
+                                .send(Decision::Ok(v))
+                                .await
+                                .expect("Unable to send vote");
+                        }
+                    }
+                }
+            }
+            Decision::Empty => {}
+        }
+        // View change
+        let n_c = self.decision_counts.get(&Decision::Complain(self.view));
+        let n_v = self.decision_counts.get(&Decision::Ok(self.view));
+        debug!("Number complaints: {:?}, number votes: {:?}", n_c, n_v);
+        if self.enough_complaints() || self.enough_votes() {
+            self.view += 1;
+        }
+
         // Ensure we have the payload. If we don't, the synchronizer will ask our workers to get it, and then
         // reschedule processing of this header once we have it.
         if self.synchronizer.missing_payload(header).await? {
@@ -211,6 +278,22 @@ impl Core {
             }
         }
         Ok(())
+    }
+
+    fn enough_votes(&mut self) -> bool {
+        let num_votes = *self
+            .decision_counts
+            .get(&Decision::Ok(self.view))
+            .unwrap_or(&0) as u32;
+        num_votes >= self.committee.validity_threshold()
+    }
+
+    fn enough_complaints(&mut self) -> bool {
+        let num_complaints = *self
+            .decision_counts
+            .get(&Decision::Complain(self.view))
+            .unwrap_or(&0) as u32;
+        num_complaints >= self.committee.quorum_threshold()
     }
 
     #[async_recursion]
@@ -347,14 +430,30 @@ impl Core {
 
     // Main loop listening to incoming messages.
     pub async fn run(&mut self) {
+        let timer = sleep(Duration::from_millis(self.max_header_delay));
+        tokio::pin!(timer);
         loop {
+            if self.name == self.committee.leader((self.view + 1) as usize) {
+                self.tx_next_view_decision
+                    .send(Decision::Propose(self.view + 1))
+                    .await
+                    .expect("Unable to send proposal");
+            }
+
             let result = tokio::select! {
                 // We receive here messages from other primaries.
                 Some(message) = self.rx_primaries.recv() => {
                     match message {
                         PrimaryMessage::Header(header) => {
                             match self.sanitize_header(&header) {
-                                Ok(()) => self.process_header(&header).await,
+                                Ok(()) => {
+                                    self.timer_expired = timer.is_elapsed();
+                                    if timer.is_elapsed() {
+                                        let deadline = Instant::now() + Duration::from_millis(self.max_header_delay);
+                                        timer.as_mut().reset(deadline);
+                                    }
+                                    self.process_header(&header).await
+                                },
                                 error => error
                             }
 

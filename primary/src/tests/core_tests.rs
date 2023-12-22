@@ -15,6 +15,7 @@ async fn process_header() {
     let mut signature_service = SignatureService::new(secret);
 
     let committee = committee_with_base_port(13_000);
+    let max_header_delay = 200;
 
     let (tx_sync_headers, _rx_sync_headers) = channel(1);
     let (tx_sync_certificates, _rx_sync_certificates) = channel(1);
@@ -24,6 +25,7 @@ async fn process_header() {
     let (_tx_headers, rx_headers) = channel(1);
     let (tx_consensus, _rx_consensus) = channel(1);
     let (tx_parents, _rx_parents) = channel(1);
+    let (tx_next_view_decision, _rx_next_view_decision) = channel(1);
 
     // Create a new test store.
     let path = ".db_test_process_header";
@@ -58,10 +60,12 @@ async fn process_header() {
         signature_service,
         /* consensus_round */ Arc::new(AtomicU64::new(0)),
         /* gc_depth */ 50,
+        /* max_header_delay */ max_header_delay,
         /* rx_primaries */ rx_primary_messages,
         /* rx_header_waiter */ rx_headers_loopback,
         /* rx_certificate_waiter */ rx_certificates_loopback,
         /* rx_proposer */ rx_headers,
+        /* tx_next_view_decision */ tx_next_view_decision,
         tx_consensus,
         /* tx_proposer */ tx_parents,
     );
@@ -92,6 +96,7 @@ async fn process_header() {
 async fn process_header_missing_parent() {
     let (name, secret) = keys().pop().unwrap();
     let signature_service = SignatureService::new(secret);
+    let max_header_delay = 200;
 
     let (tx_sync_headers, _rx_sync_headers) = channel(1);
     let (tx_sync_certificates, _rx_sync_certificates) = channel(1);
@@ -101,6 +106,7 @@ async fn process_header_missing_parent() {
     let (_tx_headers, rx_headers) = channel(1);
     let (tx_consensus, _rx_consensus) = channel(1);
     let (tx_parents, _rx_parents) = channel(1);
+    let (tx_next_view_decision, _rx_next_view_decision) = channel(1);
 
     // Create a new test store.
     let path = ".db_test_process_header_missing_parent";
@@ -125,10 +131,12 @@ async fn process_header_missing_parent() {
         signature_service,
         /* consensus_round */ Arc::new(AtomicU64::new(0)),
         /* gc_depth */ 50,
+        /* max_header_delay */ max_header_delay,
         /* rx_primaries */ rx_primary_messages,
         /* rx_header_waiter */ rx_headers_loopback,
         /* rx_certificate_waiter */ rx_certificates_loopback,
         /* rx_proposer */ rx_headers,
+        /* tx_next_view_decision */ tx_next_view_decision,
         tx_consensus,
         /* tx_proposer */ tx_parents,
     );
@@ -152,6 +160,7 @@ async fn process_header_missing_parent() {
 async fn process_header_missing_payload() {
     let (name, secret) = keys().pop().unwrap();
     let signature_service = SignatureService::new(secret);
+    let max_header_delay = 200;
 
     let (tx_sync_headers, _rx_sync_headers) = channel(1);
     let (tx_sync_certificates, _rx_sync_certificates) = channel(1);
@@ -161,6 +170,7 @@ async fn process_header_missing_payload() {
     let (_tx_headers, rx_headers) = channel(1);
     let (tx_consensus, _rx_consensus) = channel(1);
     let (tx_parents, _rx_parents) = channel(1);
+    let (tx_next_view_decision, _rx_next_view_decision) = channel(1);
 
     // Create a new test store.
     let path = ".db_test_process_header_missing_payload";
@@ -185,10 +195,12 @@ async fn process_header_missing_payload() {
         signature_service,
         /* consensus_round */ Arc::new(AtomicU64::new(0)),
         /* gc_depth */ 50,
+        /* max_header_delay */ max_header_delay,
         /* rx_primaries */ rx_primary_messages,
         /* rx_header_waiter */ rx_headers_loopback,
         /* rx_certificate_waiter */ rx_certificates_loopback,
         /* rx_proposer */ rx_headers,
+        /* tx_next_view_decision */ tx_next_view_decision,
         tx_consensus,
         /* tx_proposer */ tx_parents,
     );
@@ -214,6 +226,7 @@ async fn process_votes() {
     let signature_service = SignatureService::new(secret);
 
     let committee = committee_with_base_port(13_100);
+    let max_header_delay = 200;
 
     let (tx_sync_headers, _rx_sync_headers) = channel(1);
     let (tx_sync_certificates, _rx_sync_certificates) = channel(1);
@@ -223,6 +236,7 @@ async fn process_votes() {
     let (_tx_headers, rx_headers) = channel(1);
     let (tx_consensus, _rx_consensus) = channel(1);
     let (tx_parents, _rx_parents) = channel(1);
+    let (tx_next_view_decision, _rx_next_view_decision) = channel(1);
 
     // Create a new test store.
     let path = ".db_test_process_vote";
@@ -247,10 +261,12 @@ async fn process_votes() {
         signature_service,
         /* consensus_round */ Arc::new(AtomicU64::new(0)),
         /* gc_depth */ 50,
+        /* max_header_delay */ max_header_delay,
         /* rx_primaries */ rx_primary_messages,
         /* rx_header_waiter */ rx_headers_loopback,
         /* rx_certificate_waiter */ rx_certificates_loopback,
         /* rx_proposer */ rx_headers,
+        /* tx_next_view_decision */ tx_next_view_decision,
         tx_consensus,
         /* tx_proposer */ tx_parents,
     );
@@ -286,6 +302,7 @@ async fn process_votes() {
 async fn process_certificates() {
     let (name, secret) = keys().pop().unwrap();
     let signature_service = SignatureService::new(secret);
+    let max_header_delay = 200;
 
     let (tx_sync_headers, _rx_sync_headers) = channel(1);
     let (tx_sync_certificates, _rx_sync_certificates) = channel(1);
@@ -295,6 +312,7 @@ async fn process_certificates() {
     let (_tx_headers, rx_headers) = channel(1);
     let (tx_consensus, mut rx_consensus) = channel(3);
     let (tx_parents, mut rx_parents) = channel(1);
+    let (tx_next_view_decision, _rx_next_view_decision) = channel(1);
 
     // Create a new test store.
     let path = ".db_test_process_certificates";
@@ -319,10 +337,12 @@ async fn process_certificates() {
         signature_service,
         /* consensus_round */ Arc::new(AtomicU64::new(0)),
         /* gc_depth */ 50,
+        /* max_header_delay */ max_header_delay,
         /* rx_primaries */ rx_primary_messages,
         /* rx_header_waiter */ rx_headers_loopback,
         /* rx_certificate_waiter */ rx_certificates_loopback,
         /* rx_proposer */ rx_headers,
+        /* tx_next_view_decision */ tx_next_view_decision,
         tx_consensus,
         /* tx_proposer */ tx_parents,
     );
@@ -343,7 +363,7 @@ async fn process_certificates() {
 
     // Ensure the core sends the parents of the certificates to the proposer.
     let received = rx_parents.recv().await.unwrap();
-    let parents = certificates.iter().map(|x| x.digest()).collect();
+    let parents = certificates.clone();
     assert_eq!(received, (parents, 1));
 
     // Ensure the core sends the certificates to the consensus.
