@@ -28,9 +28,9 @@ struct State {
     /// Keeps the latest committed certificate (and its parents) for every authority. Anything older
     /// must be regularly cleaned up through the function `update`.
     dag: Dag,
-    /// Keeps the latest committed certificates ordered by view for every authorithy. Anything older 
+    /// Keeps the latest committed certificates ordered by view for every authorithy. Anything older
     /// must be regularly cleaned up through the function `update`.
-    /// TODO: Fix update to clear logical dag state 
+    /// TODO: Fix update to clear logical dag state
     logical_dag: LogicalDag,
     seen_leader: HashMap<Round, bool>,
 }
@@ -42,7 +42,11 @@ impl State {
             .map(|x| (x.origin(), (x.digest(), x)))
             .collect::<HashMap<_, _>>();
         let mut init_logical_dag: LogicalDag = HashMap::new();
-        for (r, v1) in [(0, genesis.clone())].iter().cloned().collect::<HashMap<_, _>>() {
+        for (r, v1) in [(0, genesis.clone())]
+            .iter()
+            .cloned()
+            .collect::<HashMap<_, _>>()
+        {
             for (pk, dc) in v1 {
                 init_logical_dag
                     .entry(r)
@@ -63,7 +67,6 @@ impl State {
         }
     }
 
-    // TODO: Fix this function to work for newly committed views
     /// Update and clean up internal state base on committed certificates.
     fn update(&mut self, certificate: &Certificate, gc_depth: Round) {
         self.last_committed
@@ -131,9 +134,8 @@ impl Consensus {
         while let Some(certificate) = self.rx_primary.recv().await {
             debug!("Processing {:?}", certificate);
             let round = certificate.round();
-            let wrapped_view = certificate.view();
-            let view = if wrapped_view.is_some() {
-                wrapped_view.unwrap()
+            let view = if certificate.view().is_some() {
+                certificate.view().unwrap()
             } else {
                 std::u64::MAX
             };
@@ -143,7 +145,7 @@ impl Consensus {
                 certificate.origin(),
                 (certificate.digest(), certificate.clone()),
             );
-            if wrapped_view.is_some() {
+            if certificate.view().is_some() {
                 state
                     .logical_dag
                     .entry(view)
@@ -176,22 +178,24 @@ impl Consensus {
             }
 
             // Try to see if leader of this view committed
-            let ok_stake: Stake = state.logical_dag
+            let ok_stake: Stake = state
+                .logical_dag
                 .get(&view)
                 .expect("We should have the whole history by now")
                 .values()
-                .map(|vals| 
-                    vals
-                        .iter()
-                        .filter(|(_, x)| {
-                            match x.view() {
-                                Some(v) => x.decision() == Decision::Ok(v),
-                                _ => false,
+                .flat_map(|vals| {
+                    vals.iter().filter_map(|(_, x)| {
+                        x.view().and_then(|v| {
+                            if x.decision() == Decision::Ok(v) {
+                                Some(self.committee.stake(&x.origin()))
+                            } else {
+                                None
                             }
                         })
-                        .map(|(_, x)| self.committee.stake(&x.origin())).sum::<Stake>())
+                    })
+                })
                 .sum();
-            
+
             if ok_stake < self.committee.validity_threshold() {
                 debug!("Leader {:?} does not have enough support", leader);
                 continue;
@@ -200,7 +204,12 @@ impl Consensus {
             state.last_committed_round = leader_round;
 
             // Get an ordered list of past leaders that are linked to the current leader.
-            debug!("Leader {:?} has enough support in round {:?} and decision {:?}", leader, leader.round(), leader.decision());
+            debug!(
+                "Leader {:?} has enough support in round {:?} and decision {:?}",
+                leader,
+                leader.round(),
+                leader.decision()
+            );
             let mut sequence = Vec::new();
             for leader in self.order_leaders(leader, &state).iter().rev() {
                 // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
@@ -257,11 +266,11 @@ impl Consensus {
         // Elect the leader.
         let leader = self.committee.leader(seed as usize);
 
-        // Return its certificate and the certificate's digest. (any certificate is fine, since they 
+        // Return its certificate and the certificate's digest. (any certificate is fine, since they
         // come from the same leader and view)
         let has_leader = dag.get(&round).map(|x| x.get(&leader)).flatten();
         match has_leader {
-            Some(_) => { 
+            Some(_) => {
                 let leader = has_leader.unwrap().get(0);
                 match leader {
                     Some(_) => {
@@ -271,15 +280,10 @@ impl Consensus {
                         } else {
                             None
                         }
-                    },
+                    }
                     _ => None,
                 }
-                // if leader.is_some() && leader.unwrap().1.decision() == Decision::Propose {
-                //     return leader;
-                // } else {
-                //     return None;
-                // }
-            },
+            }
             None => None,
         }
     }
@@ -309,12 +313,13 @@ impl Consensus {
                 .get(&v)
                 .expect("We should have the whole history by now")
                 .values()
-                .filter(|vals| 
-                    vals
-                        .iter()
+                .filter(|vals| {
+                    vals.iter()
                         .filter(|(_digest, _)| parents.iter().any(|x| *x == prev_leader))
-                        .collect::<Vec<_>>().len() > 0
-                )
+                        .collect::<Vec<_>>()
+                        .len()
+                        > 0
+                })
                 .flat_map(|vals| vals.iter().map(|(_, certificate)| certificate))
                 .collect::<Vec<_>>();
             if parents.len() >= 1 {

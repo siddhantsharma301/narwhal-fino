@@ -8,7 +8,6 @@ use crypto::{Digest, PublicKey, SignatureService};
 use log::info;
 use log::{debug, log_enabled, warn};
 use std::cmp::Ordering;
-// use std::collections::HashMap;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
 
