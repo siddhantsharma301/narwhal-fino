@@ -1,7 +1,7 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 from fabric import task
 
-from benchmark.local import LocalBench
+from benchmark.local import LocalBench, WeldLocalBench
 from benchmark.logs import ParseError, LogParser
 from benchmark.utils import Print
 from benchmark.plot import Ploter, PlotError
@@ -31,6 +31,33 @@ def local(ctx, debug=True):
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug)
+        print(ret.result())
+    except BenchError as e:
+        Print.error(e)
+
+
+@task
+def weld_local(ctx, debug=True):
+    ''' Run benchmarks on localhost '''
+    bench_params = {
+        'faults': 0,
+        'nodes': 4,
+        'workers': 1,
+        'rate': 10_000,
+        'tx_size': 512,
+        'duration': 20,
+    }
+    node_params = {
+        'header_size': 1_000,  # bytes
+        'max_header_delay': 200,  # ms
+        'gc_depth': 50,  # rounds
+        'sync_retry_delay': 5_000,  # ms
+        'sync_retry_nodes': 3,  # number of nodes
+        'batch_size': 500_000,  # bytes
+        'max_batch_delay': 200  # ms
+    }
+    try:
+        ret = WeldLocalBench(bench_params, node_params).run(debug)
         print(ret.result())
     except BenchError as e:
         Print.error(e)
