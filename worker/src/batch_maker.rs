@@ -2,15 +2,15 @@
 use crate::quorum_waiter::QuorumWaiterMessage;
 use crate::worker::WorkerMessage;
 use bytes::Bytes;
-#[cfg(feature = "benchmark")]
+#[cfg(any(feature = "benchmark", feature = "weld"))]
 use crypto::Digest;
 use crypto::PublicKey;
-#[cfg(feature = "benchmark")]
+#[cfg(any(feature = "benchmark", feature = "weld"))]
 use ed25519_dalek::{Digest as _, Sha512};
-#[cfg(feature = "benchmark")]
+#[cfg(any(feature = "benchmark", feature = "weld"))]
 use log::info;
 use network::ReliableSender;
-#[cfg(feature = "benchmark")]
+#[cfg(any(feature = "benchmark", feature = "weld"))]
 use std::convert::TryInto as _;
 use std::net::SocketAddr;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -100,7 +100,7 @@ impl BatchMaker {
 
     /// Seal and broadcast the current batch.
     async fn seal(&mut self) {
-        #[cfg(feature = "benchmark")]
+        #[cfg(any(feature = "benchmark", feature = "weld"))]
         let size = self.current_batch_size;
 
         // Look for sample txs (they all start with 0) and gather their txs id (the next 8 bytes).
@@ -110,6 +110,14 @@ impl BatchMaker {
             .iter()
             .filter(|tx| tx[0] == 0u8 && tx.len() > 8)
             .filter_map(|tx| tx[1..9].try_into().ok())
+            .collect();
+
+        #[cfg(feature = "weld")]
+        let tx_ids: Vec<_> = self
+            .current_batch
+            .iter()
+            .filter(|tx| tx[0] == 123u8 && tx.len() > 8)
+            .filter_map(|tx| serde_json::from_slice::<TransactionRequest>(&tx).unwrap().nonce)
             .collect();
 
         // Serialize the batch.
@@ -133,6 +141,28 @@ impl BatchMaker {
                     "Batch {:?} contains sample tx {}",
                     digest,
                     u64::from_be_bytes(id)
+                );
+            }
+
+            // NOTE: This log entry is used to compute performance.
+            info!("Batch {:?} contains {} B", digest, size);
+        }
+
+        #[cfg(feature = "weld")]
+        {
+            // NOTE: This is one extra hash that is only needed to print the following log entries.
+            let digest = Digest(
+                Sha512::digest(&serialized).as_slice()[..32]
+                    .try_into()
+                    .unwrap(),
+            );
+
+            for id in tx_ids {
+                // NOTE: This log entry is used to compute performance.
+                info!(
+                    "Batch {:?} contains sample tx {}",
+                    digest,
+                    id
                 );
             }
 

@@ -1,4 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+#[cfg(not(feature = "weld"))]
 use anyhow::{Context, Result};
 use clap::{crate_name, crate_version, App, AppSettings, ArgMatches, SubCommand};
 use config::Export as _;
@@ -6,17 +7,26 @@ use config::Import as _;
 use config::{Committee, KeyPair, Parameters, WorkerId};
 use consensus::Consensus;
 use env_logger::Env;
-use primary::{Certificate, Primary};
+#[cfg(not(feature = "weld"))]
+use primary::Certificate;
+use primary::Primary;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver};
 use worker::Worker;
+
+#[cfg(feature = "weld")]
+use crypto::PublicKey;
+#[cfg(feature = "weld")]
+use eyre::{Result, WrapErr};
+#[cfg(feature = "weld")]
+use std::net::SocketAddr;
 
 /// The default channel capacity.
 pub const CHANNEL_CAPACITY: usize = 1_000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let matches = App::new(crate_name!())
+    let mut app = App::new(crate_name!())
         .version(crate_version!())
         .about("A research implementation of Narwhal and Tusk.")
         .args_from_usage("-v... 'Sets the level of verbosity'")
@@ -25,23 +35,47 @@ async fn main() -> Result<()> {
                 .about("Print a fresh key pair to file")
                 .args_from_usage("--filename=<FILE> 'The file where to print the new key pair'"),
         )
-        .subcommand(
-            SubCommand::with_name("run")
-                .about("Run a node")
-                .args_from_usage("--keys=<FILE> 'The file containing the node keys'")
-                .args_from_usage("--committee=<FILE> 'The file containing committee information'")
-                .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
-                .args_from_usage("--store=<PATH> 'The path where to create the data store'")
-                .subcommand(SubCommand::with_name("primary").about("Run a single primary"))
-                .subcommand(
-                    SubCommand::with_name("worker")
-                        .about("Run a single worker")
-                        .args_from_usage("--id=<INT> 'The worker id'"),
-                )
-                .setting(AppSettings::SubcommandRequiredElseHelp),
-        )
-        .setting(AppSettings::SubcommandRequiredElseHelp)
-        .get_matches();
+        .setting(AppSettings::SubcommandRequiredElseHelp);
+
+    #[cfg(not(feature = "weld"))]
+    app.subcommand(
+        SubCommand::with_name("run")
+            .about("Run a node")
+            .args_from_usage("--keys=<FILE> 'The file containing the node keys'")
+            .args_from_usage("--committee=<FILE> 'The file containing committee information'")
+            .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
+            .args_from_usage("--store=<PATH> 'The path where to create the data store'")
+            .subcommand(SubCommand::with_name("primary").about("Run a single primary"))
+            .subcommand(
+                SubCommand::with_name("worker")
+                    .about("Run a single worker")
+                    .args_from_usage("--id=<INT> 'The worker id'"),
+            )
+            .setting(AppSettings::SubcommandRequiredElseHelp),
+    );
+    #[cfg(feature = "weld")]
+    app.subcommand(
+        SubCommand::with_name("run")
+            .about("Run a node")
+            .args_from_usage("--keys=<FILE> 'The file containing the node keys'")
+            .args_from_usage("--committee=<FILE> 'The file containing committee information'")
+            .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
+            .args_from_usage("--store=<PATH> 'The path where to create the data store'")
+            .subcommand(SubCommand::with_name("primary").about("Run a single primary"))
+            .subcommand(
+                SubCommand::with_name("primary")
+                    .about("Run a single primary")
+                    .args_from_usage(
+                        "--app-api=<URL> 'The host of the ABCI app receiving transactions'",
+                    )
+                    .args_from_usage(
+                        "--abci-api=<URL> 'The address to receive ABCI connections to'",
+                    ),
+            )
+            .setting(AppSettings::SubcommandRequiredElseHelp),
+    );
+
+    let matches = app.get_matches();
 
     let log_level = match matches.occurrences_of("v") {
         0 => "error",
@@ -51,7 +85,7 @@ async fn main() -> Result<()> {
         _ => "trace",
     };
     let mut logger = env_logger::Builder::from_env(Env::default().default_filter_or(log_level));
-    #[cfg(feature = "benchmark")]
+    #[cfg(any(feature = "benchmark", feature = "weld"))]
     logger.format_timestamp_millis();
     logger.init();
 
@@ -94,24 +128,50 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
     // Check whether to run a primary, a worker, or an entire authority.
     match matches.subcommand() {
         // Spawn the primary and consensus core.
-        ("primary", _) => {
+        ("primary", Some(sub_matches)) => {
             let (tx_new_certificates, rx_new_certificates) = channel(CHANNEL_CAPACITY);
             let (tx_feedback, rx_feedback) = channel(CHANNEL_CAPACITY);
+
+            #[cfg(feature = "weld")]
+            {
+                let keypair_name = keypair.name;
+
+                let app_api = sub_matches.value_of("app-api").unwrap().to_string();
+                let abci_api = sub_matches.value_of("abci-api").unwrap().to_string();
+
+                log::info!("Starting primary with abci-api: {}", abci_api);
+            }
+
             Primary::spawn(
                 keypair,
                 committee.clone(),
                 parameters.clone(),
-                store,
+                store.clone(),
                 /* tx_consensus */ tx_new_certificates,
                 /* rx_consensus */ rx_feedback,
             );
             Consensus::spawn(
-                committee,
+                committee.clone(),
                 parameters.gc_depth,
                 /* rx_primary */ rx_new_certificates,
                 /* tx_primary */ tx_feedback,
                 tx_output,
             );
+
+            #[cfg(feature = "weld")]
+            {
+                process(
+                    rx_output,
+                    store_path,
+                    keypair_name,
+                    committee,
+                    abci_api,
+                    app_api,
+                )
+                .await?;
+
+                log::info!("Primary terminated");
+            }
         }
 
         // Spawn a single worker.
@@ -121,11 +181,21 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
                 .unwrap()
                 .parse::<WorkerId>()
                 .context("The worker id must be a positive integer")?;
+            #[cfg(not(feature = "weld"))]
             Worker::spawn(keypair.name, id, committee, parameters, store);
+
+            #[cfg(feature = "weld")]
+            {
+                Worker::spawn(keypair_name, id, committee, parameters, store.clone());
+
+                // for a worker there is nothing coming here ...
+                rx_output.recv().await;
+            }
         }
         _ => unreachable!(),
     }
 
+    #[cfg(not(feature = "weld"))]
     // Analyze the consensus' output.
     analyze(rx_output).await;
 
@@ -133,9 +203,45 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
     unreachable!();
 }
 
+#[cfg(not(feature = "weld"))]
 /// Receives an ordered list of certificates and apply any application-specific logic.
 async fn analyze(mut rx_output: Receiver<Certificate>) {
     while let Some(_certificate) = rx_output.recv().await {
         // NOTE: Here goes the application logic.
     }
+}
+
+#[cfg(feature = "weld")]
+async fn process(
+    rx_output: Receiver<primary::Certificate>,
+    store_path: &str,
+    keypair_name: PublicKey,
+    committee: Committee,
+    abci_api: String,
+    app_api: String,
+) -> eyre::Result<()> {
+    // address of mempool
+    let mempool_address = committee
+        .worker(&keypair_name.clone(), &0)
+        .expect("Our public key or worker id is not in the committee")
+        .transactions;
+
+    // ABCI queries will be sent using this from the RPC to the ABCI client
+    let (tx_abci_queries, rx_abci_queries) = channel(CHANNEL_CAPACITY);
+
+    tokio::spawn(async move {
+        let api = RpcApi::new(mempool_address, tx_abci_queries);
+        // Spawn the ABCI RPC endpoint
+        let mut address = abci_api.parse::<SocketAddr>().unwrap();
+        address.set_ip("0.0.0.0".parse().unwrap());
+        warp::serve(api.routes()).run(address).await
+    });
+
+    // Analyze the consensus' output.
+    // Spawn the network receiver listening to messages from the other primaries.
+    let app_address = app_api.parse::<SocketAddr>().unwrap();
+    let mut engine = Engine::new(app_address, store_path, rx_abci_queries);
+    engine.run(rx_output).await?;
+
+    Ok(())
 }

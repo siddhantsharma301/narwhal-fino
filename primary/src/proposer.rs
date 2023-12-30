@@ -4,7 +4,7 @@ use crate::primary::Round;
 use config::{Committee, WorkerId};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
-#[cfg(feature = "benchmark")]
+#[cfg(any(feature = "benchmark", feature = "weld"))]
 use log::info;
 use log::{debug, log_enabled, warn};
 use std::cmp::Ordering;
@@ -101,7 +101,7 @@ impl Proposer {
         .await;
         debug!("Created {:?}", header);
 
-        #[cfg(feature = "benchmark")]
+        #[cfg(any(feature = "benchmark", feature = "weld"))]
         for digest in header.payload.keys() {
             // NOTE: This log entry is used to compute performance.
             info!("Created {} -> {:?}", header, digest);

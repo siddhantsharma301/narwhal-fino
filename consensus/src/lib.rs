@@ -231,10 +231,10 @@ impl Consensus {
 
             // Output the sequence in the right order.
             for certificate in sequence {
-                #[cfg(not(feature = "benchmark"))]
+                #[cfg(not(any(feature = "benchmark", feature = "weld")))]
                 info!("Committed {}", certificate.header);
 
-                #[cfg(feature = "benchmark")]
+                #[cfg(any(feature = "benchmark", feature = "weld"))]
                 for digest in certificate.header.payload.keys() {
                     // NOTE: This log entry is used to compute performance.
                     info!("Committed {} -> {:?}", certificate.header, digest);
