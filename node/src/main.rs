@@ -20,6 +20,8 @@ use crypto::PublicKey;
 use eyre::{Result, WrapErr};
 #[cfg(feature = "weld")]
 use std::net::SocketAddr;
+#[cfg(feature="weld")]
+use weld_narwhal::{Engine, RpcApi};
 
 /// The default channel capacity.
 pub const CHANNEL_CAPACITY: usize = 1_000;
@@ -38,42 +40,47 @@ async fn main() -> Result<()> {
         .setting(AppSettings::SubcommandRequiredElseHelp);
 
     #[cfg(not(feature = "weld"))]
-    app.subcommand(
-        SubCommand::with_name("run")
-            .about("Run a node")
-            .args_from_usage("--keys=<FILE> 'The file containing the node keys'")
-            .args_from_usage("--committee=<FILE> 'The file containing committee information'")
-            .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
-            .args_from_usage("--store=<PATH> 'The path where to create the data store'")
-            .subcommand(SubCommand::with_name("primary").about("Run a single primary"))
-            .subcommand(
-                SubCommand::with_name("worker")
-                    .about("Run a single worker")
-                    .args_from_usage("--id=<INT> 'The worker id'"),
-            )
-            .setting(AppSettings::SubcommandRequiredElseHelp),
-    );
+    {
+        app = app.subcommand(
+            SubCommand::with_name("run")
+                .about("Run a node")
+                .args_from_usage("--keys=<FILE> 'The file containing the node keys'")
+                .args_from_usage("--committee=<FILE> 'The file containing committee information'")
+                .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
+                .args_from_usage("--store=<PATH> 'The path where to create the data store'")
+                .subcommand(SubCommand::with_name("primary").about("Run a single primary"))
+                .subcommand(
+                    SubCommand::with_name("worker")
+                        .about("Run a single worker")
+                        .args_from_usage("--id=<INT> 'The worker id'"),
+                )
+                .setting(AppSettings::SubcommandRequiredElseHelp),
+        );
+    }
+
     #[cfg(feature = "weld")]
-    app.subcommand(
-        SubCommand::with_name("run")
-            .about("Run a node")
-            .args_from_usage("--keys=<FILE> 'The file containing the node keys'")
-            .args_from_usage("--committee=<FILE> 'The file containing committee information'")
-            .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
-            .args_from_usage("--store=<PATH> 'The path where to create the data store'")
-            .subcommand(SubCommand::with_name("primary").about("Run a single primary"))
-            .subcommand(
-                SubCommand::with_name("primary")
-                    .about("Run a single primary")
-                    .args_from_usage(
-                        "--app-api=<URL> 'The host of the ABCI app receiving transactions'",
-                    )
-                    .args_from_usage(
-                        "--abci-api=<URL> 'The address to receive ABCI connections to'",
-                    ),
-            )
-            .setting(AppSettings::SubcommandRequiredElseHelp),
-    );
+    {
+        app = app.subcommand(
+            SubCommand::with_name("run")
+                .about("Run a node")
+                .args_from_usage("--keys=<FILE> 'The file containing the node keys'")
+                .args_from_usage("--committee=<FILE> 'The file containing committee information'")
+                .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
+                .args_from_usage("--store=<PATH> 'The path where to create the data store'")
+                .subcommand(SubCommand::with_name("primary").about("Run a single primary"))
+                .subcommand(
+                    SubCommand::with_name("primary")
+                        .about("Run a single primary")
+                        .args_from_usage(
+                            "--app-api=<URL> 'The host of the ABCI app receiving transactions'",
+                        )
+                        .args_from_usage(
+                            "--abci-api=<URL> 'The address to receive ABCI connections to'",
+                        ),
+                )
+                .setting(AppSettings::SubcommandRequiredElseHelp),
+        );
+    }
 
     let matches = app.get_matches();
 
@@ -85,8 +92,10 @@ async fn main() -> Result<()> {
         _ => "trace",
     };
     let mut logger = env_logger::Builder::from_env(Env::default().default_filter_or(log_level));
+
     #[cfg(any(feature = "benchmark", feature = "weld"))]
     logger.format_timestamp_millis();
+
     logger.init();
 
     match matches.subcommand() {
@@ -186,7 +195,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
 
             #[cfg(feature = "weld")]
             {
-                Worker::spawn(keypair_name, id, committee, parameters, store.clone());
+                Worker::spawn(keypair_name, id, committee, parameters, store);
 
                 // for a worker there is nothing coming here ...
                 rx_output.recv().await;

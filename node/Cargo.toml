@@ -6,7 +6,7 @@ edition = "2018"
 
 [dependencies]
 tokio = { version = "1.5.0", features = ["full"] }
-tokio-util = { version = "0.6.2", features= ["codec"] }
+tokio-util = { version = "0.6.2", features = ["codec"] }
 clap = "2.33.3"
 env_logger = "0.7.1"
 log = "0.4.11"
@@ -23,13 +23,33 @@ crypto = { path = "../crypto" }
 primary = { path = "../primary" }
 worker = { path = "../worker" }
 consensus = { path = "../consensus" }
-weld_narwhal = { git = "ssh://git@github.com/siddhantsharma301/weld.git", package="narwhal" }
+
+anvil-rpc = { package = "anvil-rpc", git = "https://github.com/foundry-rs/foundry", optional = true }
+ethers = { version = "2.0.4", optional = true }
+weld-evm = { git = "ssh://git@github.com/siddhantsharma301/weld.git", branch = "sid/fino-bench", package = "evm-abci", optional = true }
+weld-narwhal = { git = "ssh://git@github.com/siddhantsharma301/weld.git", branch = "sid/fino-bench", package = "narwhal-abci", optional = true }
+yansi = { version = "0.5.1", optional = true }
 
 [features]
 benchmark = ["worker/benchmark", "primary/benchmark", "consensus/benchmark"]
-weld = ["worker/weld", "primary/weld", "consensus/weld", "eyre"]
+weld = [
+    "worker/weld",
+    "primary/weld",
+    "consensus/weld",
+    "anvil-rpc",
+    "ethers",
+    "eyre",
+    "weld-evm",
+    "weld-narwhal",
+    "yansi",
+]
 
-[[bin]]         
-name = "benchmark_client"   
-path = "src/benchmark_client.rs" 
-required-features = ["benchmark"] 
+[[bin]]
+name = "benchmark_client"
+path = "src/benchmark_client.rs"
+required-features = ["benchmark"]
+
+[[bin]]
+name = "weld_client"
+path = "src/benchmark_client.rs"
+required-features = ["weld"]

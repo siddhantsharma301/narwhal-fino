@@ -13,6 +13,19 @@ use tokio::net::TcpStream;
 use tokio::time::{interval, sleep, Duration, Instant};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+#[cfg(feature = "weld")]
+use anvil_rpc::request::RequestParams;
+#[cfg(feature = "weld")]
+use ethers::{
+    abi::ethereum_types::{Secret, H520},
+    core::rand::Rng,
+    prelude::*,
+};
+#[cfg(feature = "weld")]
+use weld_evm::types::QueryResponse;
+#[cfg(feature = "weld")]
+use yansi::Paint;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let matches = App::new(crate_name!())
@@ -102,7 +115,16 @@ impl Client {
         let burst = self.rate / PRECISION;
         let mut tx = BytesMut::with_capacity(self.size);
         let mut counter = 0;
+
+        #[cfg(not(feature = "weld"))]
         let mut r = rand::thread_rng().gen();
+
+        #[cfg(feature = "weld")]
+        {
+            let mut rng = rand::thread_rng();
+            let addresses = get_accounts("http://127.0.0.1:3002").await?;
+        }
+
         let mut transport = Framed::new(stream, LengthDelimitedCodec::new());
         let interval = interval(Duration::from_millis(BURST_DURATION));
         tokio::pin!(interval);
@@ -115,29 +137,58 @@ impl Client {
             let now = Instant::now();
 
             for x in 0..burst {
-                if x == counter % burst {
-                    // NOTE: This log entry is used to compute performance.
-                    info!("Sending sample transaction {}", counter);
+                #[cfg(not(feature = "weld"))]
+                {
+                    if x == counter % burst {
+                        info!("Sending sample transaction {}", counter);
+    
+                        tx.put_u8(0u8); // Sample txs start with 0.
+                        tx.put_u64(counter); // This counter identifies the tx.
+                    } else {
+                        r += 1;
+                        tx.put_u8(1u8); // Standard txs start with 1.
+                        tx.put_u64(r); // Ensures all clients send different txs.
+                    };
+    
+                    tx.resize(self.size, 0u8);
+                    let bytes = tx.split().freeze();
+                    if let Err(e) = transport.send(bytes).await {
+                        warn!("Failed to send transaction: {}", e);
+                        break 'main;
+                    }
+                }
 
-                    tx.put_u8(0u8); // Sample txs start with 0.
-                    tx.put_u64(counter); // This counter identifies the tx.
-                } else {
-                    r += 1;
-                    tx.put_u8(1u8); // Standard txs start with 1.
-                    tx.put_u64(r); // Ensures all clients send different txs.
-                };
-
-                tx.resize(self.size, 0u8);
-                let bytes = tx.split().freeze();
-                if let Err(e) = transport.send(bytes).await {
-                    warn!("Failed to send transaction: {}", e);
-                    break 'main;
+                #[cfg(feature = "weld")]
+                {
+                    let host = rng.gen_range(0..4);
+                    let from = rng.gen_range(0..10);
+                    let mut to = rng.gen_range(0..10);
+                    while to == from {
+                        to = rng.gen_range(0..10);
+                    }
+                    let amount = rng.gen_range(1..10);
+                    let units = rng.gen_range(1..5);
+                    let value = ethers::utils::parse_units(amount, units)?;
+                    match send_transaction(
+                        hosts[host],
+                        addresses[from],
+                        addresses[to],
+                        value.into(),
+                        counter,
+                    )
+                    .await
+                    {
+                        Err(_) => {}
+                        Ok(_) => {}
+                    }
+                    counter += 1;
                 }
             }
             if now.elapsed().as_millis() > BURST_DURATION as u128 {
                 // NOTE: This log entry is used to compute performance.
                 warn!("Transaction rate too high for this client");
             }
+            #[cfg(not(feature = "weld"))]
             counter += 1;
         }
         Ok(())
@@ -155,4 +206,58 @@ impl Client {
         }))
         .await;
     }
+}
+
+#[cfg(feature = "weld")]
+async fn get_accounts(host: &str) -> Result<Vec<Address>> {
+    let client = reqwest::Client::new();
+    let params = serde_json::to_string(&RequestParams::Array(vec![]))?;
+    let res = client
+        .get(format!("{}/rpc_query", host))
+        .query(&[("method", "eth_accounts"), ("params", params.as_str())])
+        .send()
+        .await?;
+
+    let val = res.bytes().await?;
+    let addresses_result = serde_json::from_slice(&val).map_err(Into::into);
+    match addresses_result {
+        Ok(addresses) => Ok(addresses),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(feature = "weld")]
+async fn send_transaction(
+    host: &str,
+    from: Address,
+    to: Address,
+    value: U256,
+    counter: usize,
+) -> Result<()> {
+    let readable_value = get_readable_eth_value(value)?;
+    info!("sample transaction {:?}", counter);
+
+    let tx = TransactionRequest::new()
+        .from(from)
+        .to(to)
+        .value(value)
+        .gas(21000 + counter)
+        .nonce(counter);
+
+    let tx = serde_json::to_string(&tx)?;
+
+    let client = reqwest::Client::new();
+    client
+        .get(format!("{}/broadcast_tx", host))
+        .query(&[("tx", tx)])
+        .send()
+        .await?;
+
+    Ok(())
+}
+
+#[cfg(feature = "weld")]
+fn get_readable_eth_value(value: U256) -> Result<f64> {
+    let value_string = ethers::utils::format_units(value, "ether")?;
+    Ok(value_string.parse::<f64>()?)
 }
