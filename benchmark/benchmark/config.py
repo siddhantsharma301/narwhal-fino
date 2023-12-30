@@ -149,9 +149,107 @@ class Committee:
     def ip(address):
         assert isinstance(address, str)
         return address.split(':')[0]
+    
+class WeldCommittee(Committee):
+    ''' The committee looks as follows:
+        "authorities: {
+            "name": {
+                "stake": 1,
+                "consensus: {
+                    "consensus_to_consensus": x.x.x.x:x,
+                },
+                "primary: {
+                    "primary_to_primary": x.x.x.x:x,
+                    "worker_to_primary": x.x.x.x:x,
+                },
+                "workers": {
+                    "0": {
+                        "primary_to_worker": x.x.x.x:x,
+                        "worker_to_worker": x.x.x.x:x,
+                        "transactions": x.x.x.x:x
+                    },
+                    ...
+                }
+            },
+            ...
+        }
+    '''
+    def __init__(self, addresses, base_port):
+        ''' The `addresses` field looks as follows:
+            { 
+                "name": ["host", "host", ...],
+                ...
+            }
+        '''
+        assert isinstance(addresses, OrderedDict)
+        assert all(isinstance(x, str) for x in addresses.keys())
+        assert all(
+            isinstance(x, list) and len(x) > 1 for x in addresses.values()
+        )
+        assert all(
+            isinstance(x, str) for y in addresses.values() for x in y
+        )
+        assert len({len(x) for x in addresses.values()}) == 1
+        assert isinstance(base_port, int) and base_port > 1024
+
+        port = base_port
+        self.json = {'authorities': OrderedDict()}
+        for name, hosts in addresses.items():
+            host = hosts.pop(0)
+
+            primary_addr = {
+                'primary_to_primary': f'{host}:{port}',
+                'worker_to_primary': f'{host}:{port + 1}',
+                # new addresses for APIs
+                'api_rpc': f'{host}:{port + 2}',
+                'api_abci': f'{host}:{port + 3}',
+            }
+            port += 4
+
+            workers_addr = OrderedDict()
+            for j, host in enumerate(hosts):
+                workers_addr[j] = {
+                    'primary_to_worker': f'{host}:{port}',
+                    'transactions': f'{host}:{port + 1}',
+                    'worker_to_worker': f'{host}:{port + 2}',
+                }
+                port += 3
+
+            self.json['authorities'][name] = {
+                'stake': 1,
+                'primary': primary_addr,
+                'workers': workers_addr
+            }
+    
+    def rpc_addresses(self, faults=0):
+        ''' Returns an ordered list of rpcs' addresses. '''
+        assert faults < self.size()
+        addresses = []
+        good_nodes = self.size() - faults
+        for authority in list(self.json['authorities'].values())[:good_nodes]:
+            addresses += [authority['primary']['api_rpc']]
+        return addresses
+
+    def app_addresses(self, faults=0):
+        ''' Returns an ordered list of apps' addresses. '''
+        assert faults < self.size()
+        addresses = []
+        good_nodes = self.size() - faults
+        for authority in list(self.json['authorities'].values())[:good_nodes]:
+            addresses += [authority['primary']['api_abci']]
+        return addresses
 
 
 class LocalCommittee(Committee):
+    def __init__(self, names, port, workers):
+        assert isinstance(names, list)
+        assert all(isinstance(x, str) for x in names)
+        assert isinstance(port, int)
+        assert isinstance(workers, int) and workers > 0
+        addresses = OrderedDict((x, ['127.0.0.1']*(1+workers)) for x in names)
+        super().__init__(addresses, port)
+
+class WeldLocalCommittee(WeldCommittee):
     def __init__(self, names, port, workers):
         assert isinstance(names, list)
         assert all(isinstance(x, str) for x in names)

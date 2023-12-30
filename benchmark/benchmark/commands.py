@@ -64,3 +64,24 @@ class CommandMaker:
         assert isinstance(origin, str)
         node, client = join(origin, 'node'), join(origin, 'benchmark_client')
         return f'rm node ; rm benchmark_client ; ln -s {node} . ; ln -s {client} .'
+    
+class WeldCommandMaker(CommandMaker):
+    @staticmethod
+    def compile():
+        return 'cargo build --quiet --release --features weld'
+    
+    @staticmethod
+    def run_primary(keys, committee, store, parameters, app_api, abci_api, debug=False):
+        print(store, keys)
+        assert isinstance(keys, str)
+        assert isinstance(committee, str)
+        assert isinstance(parameters, str)
+        assert isinstance(debug, bool)
+        v = '-vvv' if debug else '-vv'
+        return (f'./node {v} run --keys {keys} --committee {committee} '
+                f'--store {store} --parameters {parameters} primary --app-api {app_api} --abci-api {abci_api}')
+    
+    @staticmethod
+    def run_app(listen_on):
+        assert isinstance(listen_on, str)
+        return f'./evm-app --demo {listen_on}'
